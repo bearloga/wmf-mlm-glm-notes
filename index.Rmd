@@ -1,0 +1,577 @@
+---
+title: "Logistic regression, multilevel models, and t-tests"
+description: |
+  A simulation study inspired by experiments in improving Wikipedia editing experience, and demonstrating multiple methodologies for analyzing data.
+author:
+  - name: Mikhail Popov
+    url: https://mpopov.com/
+    affiliation: Wikimedia Foundation
+    affiliation_url: https://wikimediafoundation.org/
+date: "`r Sys.Date()`"
+bibliography: bibliography.bib
+nocite: |
+  @r-cmdstanr, @r-brms1, @r-brms2, @r-lme4, @r-rmarkdown, @r-distill, @r-tidyverse, @r-gt, @r-gtsummary
+repository_url: https://github.com/bearloga/wmf-mlm-glm-notes
+creative_commons: CC BY
+output:
+  distill::distill_article:
+    toc: true
+    toc_depth: 2
+    toc_float: false
+    theme: wmf-product-analytics.css
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  dev = "svg"
+)
+library(here)
+
+ggplot2::theme_set(
+  hrbrthemes::theme_ipsum_rc(
+    base_size = 14, plot_title_size = 16, subtitle_size = 14, caption_size = 12
+  )
+)
+```
+
+<!-- https://chimeces.com/context-cards/ -->
+
+```{=html}
+<script src="context-cards.js"></script>
+```
+# Setup
+
+```{r packages}
+library(zeallot) # multi-assignment operator %<-%
+library(tidyverse)
+library(gt)
+library(gtsummary)
+library(lme4)
+library(brms)
+library(tidybayes)
+```
+
+# Introduction
+
+Suppose we're running a test of a new editor interface for making edits to an article and we wish to know whether this new editing interface is an improvement -- defined as "whether the user published the edit after starting it." Specifically, we're interested in a lift of 20% in the publish (successful edit attempt) probability.
+
+We will build a model of edit attempt outcomes $y$ -- which is 1 if the edit was published and 0 if it was not. We use $p$ to indicate the probability of a successful edit -- in other words: $p = \text{Pr}(y = 1)$. The simplest version of our model is a <a href="https://en.wikipedia.org/wiki/Logistic_regression" data-wiki-lang="en" data-wiki-title="Logistic regression" class="wiki-preview">logistic regression</a>:
+
+$$
+\begin{align*}
+y &\sim \text{Bernoulli}(p)\\
+\text{logit}(p) &= \beta_0 + \beta_1 \times \text{used new interface}
+\end{align*}
+$$
+
+where $\beta_0$ is the intercept, and $\beta_1$ is the slope and the effect associated with using the new interface. In other words:
+
+$$
+\begin{align*}
+& \text{Pr}(\text{edit published}|\text{did not use new interface}) & =~ & \text{logit}^{-1}(\beta_0)\\
+& \text{Pr}(\text{edit published}|\text{used new interface}) & =~ & \text{logit}^{-1}(\beta_0 + \beta_1)
+\end{align*}
+$$
+
+The goal of the statistical model here is to infer the values of $\beta_0$ and $\beta_1$.
+
+It is important to remember that these model parameters (also called coefficients) are on the *log-odds scale*, and that when we interpret their estimates we must be careful and sometimes we need to apply transformations to make sense of them.
+
+<aside>
+
+See <a href="https://en.wikipedia.org/wiki/Logit" data-wiki-lang="en" data-wiki-title="Logit" class="wiki-preview">logit</a> for more details.
+
+</aside>
+
+For example, [@gelman2021] suggest using the "divide-by-4" rule for convenience. Under this transformation $\beta_1/4$ is a reasonable approximation of the maximum increase in the probability of success corresponding to a unit difference -- in our case the difference between which interface was used ($\text{used new interface} = 0$ vs $\text{used new interface} = 1$).
+
+Alternatively, $\exp(\beta_1)$ -- or $e^{\beta_1}$ -- represents the multiplicative effect on the odds of an edit getting published.
+
+# Simulation
+
+To see the methods in action we will simulate users, their edit attempts, and the outcomes of those attempts -- whether they were successful (edit published) or not -- and then see how the models are able to recover the true values of the parameters which were used in the simulation.
+
+```{r globals}
+c(b0, b1) %<-% c(-0.7, 0.8)
+
+c(logit, invlogit)  %<-% c(qlogis, plogis) # Easier to remember
+```
+
+where `b1` is the effect of the new editor interface on the log-odds scale (refer to the introduction above).
+
+```{r simple-example, layout="l-body-outset", code_folding=TRUE}
+simple_example <- tibble(
+  new_interface = c(FALSE, TRUE),
+  formula = c("\\[\\beta_0\\]", "\\[\\beta_0 + \\beta_1\\]")
+) %>%
+  mutate(
+    log_odds = b0 + b1 * new_interface,
+    prob = invlogit(log_odds)
+  )
+simple_example %>%
+  gt() %>%
+  fmt(vars(new_interface), fns = function(x) ifelse(x, "New", "Old")) %>%
+  fmt_percent(vars(prob), decimals = 1) %>%
+  cols_label(
+    new_interface = "Editing interface",
+    formula = html("logit<sup>-1</sup>(p)"),
+    log_odds = "Log-odds scale",
+    prob = "Publish probability"
+  ) %>%
+  tab_header(
+    "Logistic regression model",
+    html(sprintf("Using &beta;<sub>0</sub> = %.1f and &beta;<sub>1</sub> = %.1f", b0, b1))
+  )
+```
+
+Let's generate some data to use for our study! We will first build a user simulator and then use that to simulate many users making edits, sometimes using the new interface and sometimes using the old interface.
+
+```{r simulate-user-edit-attempts, cache=TRUE}
+simulate_user_edit_attempts <- function() {
+
+  # unique for each user; informs that user's "base publish prob."
+  user_intercept <- b0 + rnorm(1, 0, 0.75)
+
+  # how many edit attempts did this user make?
+  n_edit_attempts <- ceiling(rexp(1, 1/50))
+
+  # simulate very active users either very into new interface or not
+  prob_using_new_interface <- ifelse(
+    n_edit_attempts > 150,    # 'active': 150+ edit attempts
+    sample(c(0.05, 0.85), 1), # for active users
+    rbeta(1, 1.5, 1.5)        # for everyone else
+  )
+  # simulate which edit attempts were performed with which interface:
+  used_new_interface <- rbernoulli(n_edit_attempts, p = prob_using_new_interface)
+
+  # each edit attempt's success prob. depends on user and interface used:
+  user_log_odds <- user_intercept + b1 * used_new_interface
+  success_probabilities <- invlogit(user_log_odds)
+
+  # simulate each edit attempt's outcome, based on that edit attempt's prob.:
+  edit_attempts <- map_lgl(success_probabilities, rbernoulli, n = 1)
+
+  # return simulated user's edits and outcomes:
+  tibble(
+    user_intercept = user_intercept,
+    user_success = boot::inv.logit(user_intercept),
+    new_interface = used_new_interface * 1L,
+    success_prob = success_probabilities,
+    edit_success = edit_attempts * 1L
+  )
+}
+```
+
+To see this simulation in action, let's simulate one user and print the first 10 edit attempts:
+
+```{r}
+set.seed(0)
+simulate_user_edit_attempts() %>%
+  head(10)
+```
+
+Notice how the user's individual intercept gets transformed into their base probability, how the choice of the interface either keeps it the same or lifts it, and how even using the new interface (and in this case having 74% probability of publishing the edit) did not yield successes in every instance.
+
+That was just one user, but our analysis will require more. Let's simulate 100 users:
+
+```{r simulated-edits, layout="l-page", cache=TRUE, dependson="simulate-user-edit-attempts"}
+set.seed(42)
+simulated_edits <- map_dfr(
+  1:100,
+  ~ simulate_user_edit_attempts(),
+  .id = "user_id"
+)
+simulated_edits <- simulated_edits %>%
+  mutate(
+    # format user IDs to use zero padding:
+    user_id = factor(sprintf("%03.0f", as.numeric(user_id)))
+  )
+```
+
+# Inference
+
+## Simple Linear Regression
+
+First, let's see what results we get from a simple model that treats all edit attempts as independent and interchangeable, even though we know this to be wrong since edit attempts from the same user are going to share a base success probability (based on that user's simulated intercept):
+
+```{r fit0}
+fit0 <- glm(
+  formula = edit_success ~ new_interface, # intercept is implied
+  family = binomial(link = "logit"),
+  data = simulated_edits
+)
+```
+
+The results are:
+
+```{r, code_folding=TRUE}
+fit0 %>%
+  tbl_regression(
+    label = list(new_interface = "Using new interface"),
+    intercept = TRUE
+  )
+```
+
+This model has done an OK job of estimating the coefficients $\beta_0$ = `r b0` and $\beta_1$ = `r b1`.
+
+## Hierarchical Logistic Regression
+
+However, the model above is fundamentally flawed because it assumes all of the edit attempts are independent and identically distributed, but this is not the case. A much more correct model would incorporate the fact that these edit attempts are related to each other because they were done by the same users.
+
+<a href="https://en.wikipedia.org/wiki/Multilevel_model" data-wiki-lang="en" data-wiki-title="Multilevel model" class="wiki-preview">Hierarchical regression models</a> &ndash; also known as *multilevel models* and *mixed-effects models* (due to the presence of *random effects* in addition to *fixed effects*) &ndash; are used to model this structure when individuals observations are grouped. We refer to these groupings as *random effects*. In fact, we can even model more deeply nested structures &ndash; for example, if we had simulated multiple wikis and multiple users within those wikis then we could model this hierarchy.
+
+```{r fit1}
+fit1 <- glmer(
+  formula = edit_success ~ new_interface + (1 | user_id),
+  family = binomial(link = "logit"),
+  data = simulated_edits
+)
+```
+
+The results are:
+
+```{r, code_folding=TRUE}
+tbl1 <- fit1 %>%
+  tbl_regression(
+    label = list(new_interface = "Using new interface"),
+    intercept = TRUE
+  )
+tbl1
+```
+
+This model has done a better job of estimating the coefficients $\beta_0$ = `r b0` and $\beta_1$ = `r b1`.
+
+### Interpretation
+
+In order to interpret these estimates, we have to apply a transformation. However, we need to be careful about the confidence intervals. The <a href="https://en.wikipedia.org/wiki/Delta_method" data-wiki-lang="en" data-wiki-title="Delta method" class="wiki-preview">delta method models</a> can be used to estimate the confidence intervals of the transformed parameters:
+
+<aside>**Spoiler**: We won't need to use the delta method in the next section when we switch to a Bayesian model.</aside>
+
+```{r, code_folding=TRUE}
+c("b1/4", "exp(b1)") %>%
+  map_dfr(
+    .f = car::deltaMethod,
+    object = fit1,
+    parameterNames = paste0("b", 0:1)
+  ) %>%
+  rownames_to_column(var = "transformation") %>%
+  gt(rowname_col = "transformation") %>%
+  fmt_number(vars(`Estimate`, `SE`, `2.5 %`, `97.5 %`)) %>%
+  cols_merge(vars(`2.5 %`, `97.5 %`), pattern = "({1}, {2})") %>%
+  cols_label(`2.5 %` = "95% CI", SE = "Standard Error") %>%
+  tab_header("Transformed effects", "Estimated using delta method") %>%
+  tab_footnote("CI: Confidence Interval", cells_column_labels(vars(`2.5 %`)))
+```
+
+The maximum lift in edit attempt success probability is 21% (95% CI: 18%-25%), and because the confidence interval does not include 0 this is statistically significant at the 0.05 level. When using the new interface the odds of publishing the edit are multiplied by 2.36 (95% CI: 2.03-2.69) -- effectively double -- and in this case we would determine statistical significance (at the 0.05 level) by checking whether this confidence interval contains 1, since a multiplicative effect of 1 is no change either way.
+
+### Highly-active users
+
+One of the things we did in the simulation was have special behavior for highly-active users. Specifically, when a user made more than 150 simulated edit attempts our simulation made approximately 5% of their edits use the new interface OR 85% of their edits use the new interface -- effectively simulating power users who are very apprehensive about the new interface or who have a strong preference for it.
+
+```{r most-active-users}
+most_active_users <- simulated_edits %>%
+  group_by(user_id) %>%
+  summarize(
+    n_edits = n(),
+    n_new_interface = sum(new_interface),
+    n_successes_new = sum(edit_success * new_interface),
+    n_successes = sum(edit_success)
+  ) %>%
+  top_n(10, n_edits)
+```
+```{r, layout="l-body-outset", code_folding=TRUE}
+most_active_users %>%
+  mutate(
+    prop_new_interface = n_new_interface / n_edits,
+    prop_successes = n_successes / n_edits,
+    prop_successes_new = n_successes_new / n_new_interface
+  ) %>%
+  gt() %>%
+  fmt(
+    starts_with("prop_"),
+    fns = function(x) sprintf("%s%.0f%%", ifelse(x < 0.1, "&nbsp;", ""), 100 * x)
+  ) %>%
+  cols_merge(ends_with("_new_interface"), pattern = "{1} (<b>{2}</b>)") %>%
+  cols_merge(ends_with("_successes"), pattern = "{1} (<b>{2}</b>)") %>%
+  cols_merge(ends_with("_successes_new"), pattern = "{1} (<b>{2}</b>)") %>%
+  cols_align("left", vars(user_id)) %>%
+  cols_align("right", starts_with("n_")) %>%
+  cols_label(
+    user_id = "User ID",
+    n_edits = "Total edit attempts",
+    n_new_interface = "Edits made using new interface",
+    n_successes = "Total edits published",
+    n_successes_new = "Edits published with new interface"
+  ) %>%
+  tab_footnote(
+    footnote = html("(<b>%</b>) is the proportion of total edits which were made using the new interface"),
+    locations = cells_column_labels(vars(n_new_interface))
+  ) %>%
+  tab_footnote(
+    footnote = html("(<b>%</b>) is the proportion of edits made using the new interface which were published"),
+    locations = cells_column_labels(vars(n_successes_new))
+  ) %>%
+  tab_footnote(
+    footnote = html("(<b>%</b>) is the proportion of total edits published"),
+    locations = cells_column_labels(vars(n_successes))
+  ) %>%
+  tab_style(
+    cell_text(font = "monospace", size = "large"),
+    cells_body(starts_with("n_"))
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "gray95")
+    ),
+    cells_body(rows = (1:nrow(most_active_users)) %% 2 == 1)
+  ) %>%
+  tab_header("Most active (simulated) users")
+```
+
+These users account for `r scales::percent(sum(most_active_users$n_edits) / nrow(simulated_edits), 1)` of all edits in this simulated dataset.
+
+Let us see what happens to the results when we exclude those users from analysis:
+
+```{r fit2}
+fit2 <- glmer(
+  formula = edit_success ~ new_interface + (1 | user_id),
+  family = binomial(link = "logit"),
+  data = anti_join(simulated_edits, most_active_users, by = "user_id")
+)
+```
+
+```{r tbl2, code_folding=TRUE}
+tbl2 <- fit2 %>%
+  tbl_regression(
+    label = list(new_interface = "Using new interface"),
+    intercept = TRUE
+  )
+tbl_merge(
+  list(tbl1, tbl2),
+  c("Including most active users", "Excluding most active users")
+)
+```
+
+```{r, code_folding=TRUE}
+list(
+  `Including most active users` = c("b1/4", "exp(b1)") %>%
+    map_dfr(
+      .f = car::deltaMethod,
+      object = fit1,
+      parameterNames = paste0("b", 0:1)
+    ) %>%
+    rownames_to_column(var = "transformation"),
+  `Excluding most active users` = c("b1/4", "exp(b1)") %>%
+    map_dfr(
+      .f = car::deltaMethod,
+      object = fit2,
+      parameterNames = paste0("b", 0:1)
+    ) %>%
+    rownames_to_column(var = "transformation")
+) %>%
+  bind_rows(.id = "dataset") %>%
+  gt(rowname_col = "transformation", groupname_col = "dataset") %>%
+  fmt_number(vars(`Estimate`, `SE`, `2.5 %`, `97.5 %`)) %>%
+  cols_merge(vars(`2.5 %`, `97.5 %`), pattern = "({1}, {2})") %>%
+  cols_label(`2.5 %` = "95% CI", SE = "Standard Error") %>%
+  tab_header("Transformed effects") %>%
+  tab_footnote("CI: Confidence Interval", cells_column_labels(vars(`2.5 %`)))
+```
+
+In this case the estimates did not change much when excluding these most active users, but still there is no reason not to include those users.
+
+## Bayesian Hierarchical Logistic Regression Model
+
+One of the benefits of switching to a Bayesian approach with this model is we can reason about the parameters (and any other quantities) probabilistically. This benefit will become apparent soon, but first we need to fit the Bayesian model and obtain draws of the parameters from what's called the joint <a href="https://en.wikipedia.org/wiki/Posterior_probability" data-wiki-lang="en" data-wiki-title="Posterior probability" class="wiki-preview">posterior distribution</a> -- so called because it's a re-allocation of possibilities (from values of parameters we thought were likely *a-priori*) after taking into account observed data.
+
+```{r fit3, cache=TRUE, results='hide', dependson="simulated-edits"}
+priors <- c(
+  set_prior(prior = "std_normal()", class = "b"),
+  set_prior("cauchy(0, 5)", class = "sd")
+)
+
+fit3 <- brm(
+  edit_success ~ new_interface + (1 | user_id),
+  family = bernoulli(link = "logit"),
+  data = simulated_edits,
+  prior = priors,
+  chains = 4, cores = 4, backend = "cmdstanr"
+)
+```
+```{r}
+summary(fit3)
+```
+```{r tbl3, layout="l-body-outset", code_folding=TRUE}
+tbl3 <- fit3 %>%
+  spread_draws(b_new_interface, b_Intercept) %>%
+  mutate(
+    exp_b = exp(b_new_interface),
+    b4 = b_new_interface / 4,
+    avg_lift = invlogit(b_Intercept + b_new_interface) - invlogit(b_Intercept)
+  ) %>%
+  pivot_longer(
+    b_new_interface:avg_lift,
+    names_to = "param",
+    values_to = "val"
+  ) %>%
+  group_by(param) %>%
+  summarize(
+    ps = c(0.025, 0.5, 0.975),
+    qs = quantile(val, probs = ps),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    quantity = ifelse(
+      param %in% c("b_Intercept", "b_new_interface"),
+      "Parameter", "Function of parameter(s)"
+    ),
+    param = factor(
+      param,
+      c("b_Intercept", "b_new_interface", "exp_b", "b4", "avg_lift"),
+      c("(Intercept)", "Using new interface", "Multiplicative effect on odds", "Divide-by-4 rule", "Average lift")
+    ),
+    ps = factor(ps, c(0.025, 0.5, 0.975), c("lower", "median", "upper")),
+  ) %>%
+  pivot_wider(names_from = "ps", values_from = "qs") %>%
+  arrange(quantity, param)
+tbl3 %>%
+  gt(rowname_col = "param", groupname_col = "quantity") %>%
+  row_group_order(c("Parameter", "Function of parameter(s)")) %>%
+  fmt_number(vars(lower, median, upper), decimals = 3) %>%
+  fmt_percent(columns = vars(median, lower, upper), rows = 2:3, decimals = 1) %>%
+  cols_align("center", vars(median, lower, upper)) %>%
+  cols_merge(vars(lower, upper), pattern = "({1}, {2})") %>%
+  cols_move_to_end(vars(lower)) %>%
+  cols_label(median = "Point Estimate", lower = "95% CI") %>%
+  tab_style(cell_text(weight = "bold"), cells_row_groups()) %>%
+  tab_footnote("CI: Credible Interval", cells_column_labels(vars(lower))) %>%
+  tab_footnote(
+    html("Average lift = Pr(Success|New interface) - Pr(Success|Old interface) = logit<sup>-1</sup>(&beta;<sub>0</sub> + &beta;<sub>1</sub>) - logit<sup>-1</sup>(&beta;<sub>0</sub>)"),
+    cells_body(vars(median), 3)
+  ) %>%
+  tab_header("Posterior summary of model parameters")
+```
+
+The results are *essentially* the same as the non-Bayesian model in the previous section. A couple of key differences:
+
+- Both the multiplicative effect on odds and the divide-by-4 rule estimates are more accurate because we did not have to approximate them using the delta method.
+- We are able to calculate the quantity "average lift" and obtain its posterior distribution, no different than the other two quantities. This is the quantity that the "divide-by-4 rule" is meant to approximate, but which we are able to obtain directly.
+
+### Hypothesis Testing
+
+Hypothesis testing in this paradigm works a little differently. Rather than performing <a href="https://en.wikipedia.org/wiki/Statistical_hypothesis_testing" data-wiki-lang="en" data-wiki-title="Statistical hypothesis testing" class="wiki-preview">null hypothesis significance testing</a> (NHST), rejecting or failing-to-reject the null hypothesis, and calculating <a href="https://en.wikipedia.org/wiki/P-value" data-wiki-lang="en" data-wiki-title="p-value" class="wiki-preview"><i>p</i>-values</a>, we can ask for probabilities of ranges.
+
+**What's the probability using the new interface at least doubles the odds of an edit getting published?**
+
+```{r hyp1}
+hyp1 <- "exp(new_interface) > 2"
+fit3 %>%
+  hypothesis(hyp1)
+```
+
+Of interest is the `Post.Prob` column -- the posterior probability. In this case, we are almost absolutely sure that the odds of an edit getting published at least double when the new interface is being used.
+
+**What's the probability that the average lift in edit attempt success probability is positive?**
+
+```{r hyp2}
+hyp2 <- "invlogit((Intercept) + new_interface) - invlogit((Intercept)) > 0"
+fit3 %>%
+  hypothesis(hyp2)
+```
+
+**What's the probability that the average lift in edit attempt success probability is at least 20%?**
+
+```{r hyp3}
+h <- "invlogit((Intercept) + new_interface) - invlogit((Intercept)) > 0.2"
+(hyp3 <- hypothesis(fit3, hypothesis = h))
+```
+
+There is a `r hyp3$hypothesis[1, "Post.Prob"]` probability that the difference between the Pr(Success | New interface) and Pr(Success | Old interface) is greater than 0.2 -- and it is up to the stakeholder to decide whether that is high enough for them or if they would prefer to see a probability of, say, 0.8.
+
+## t-test
+
+Another question we may ask is "is there a significant difference in proportions of successful edits between edits made using the new interface and those made using the old interface?"
+
+```{r edit-counts, cache=TRUE, dependson='simulated-edits', code_folding=TRUE}
+edit_counts <- simulated_edits %>%
+  group_by(user_id) %>%
+  summarize(
+    n_total_edits = n(),
+    new_ui_total_edits = sum(new_interface),
+    old_ui_total_edits = sum(1 - new_interface),
+    new_ui_successful_edits = sum(edit_success * new_interface),
+    old_ui_successful_edits = sum(edit_success * (1 - new_interface))
+  ) %>%
+  # Only users who have used both UIs at least once:
+  filter(
+    new_ui_total_edits > 0,
+    old_ui_total_edits > 0
+  ) %>%
+  mutate(
+    new_ui_prop_success = new_ui_successful_edits / new_ui_total_edits,
+    old_ui_prop_success = old_ui_successful_edits / old_ui_total_edits
+  )
+```
+
+**Note**: `r 100 - nrow(edit_counts)` users were excluded from this analysis because they did not use both interfaces, and this analysis requires at least one edit attempt using each of the interfaces.
+
+```{r tidy-counts, code_folding=TRUE}
+tidy_counts <- edit_counts %>%
+  select(user_id, contains("ui")) %>%
+  pivot_longer(
+    !user_id, 
+    names_to = c("interface", ".value"),
+    names_pattern = "(.*)_ui_(.*)",
+    values_drop_na = TRUE
+  )
+
+ggplot(tidy_counts, aes(y = prop_success, x = interface)) +
+  geom_boxplot() +
+  geom_jitter(aes(size = total_edits), width = 0.2, height = 0, alpha = 0.5) +
+  scale_y_continuous("Proportion of edits published", labels = scales::percent_format(1)) +
+  scale_size_continuous(
+    "Edits attempted by user",
+    range = c(1, 4), trans = "log", breaks = c(1, 5, 55)
+  ) +
+  ggtitle("Proportion of edits published, by interface") +
+  theme(legend.position = "bottom")
+```
+
+The users at the top (100%) and bottom (0%) made very few edits, so it is easy for the proportion to be "all" or "none" when the denominator is, say, 1.
+
+To actually test the hypothesis we perform a <b>paired <a href="https://en.wikipedia.org/wiki/Student%27s_t-test" data-wiki-lang="en" data-wiki-title="Student's t-test" class="wiki-preview"><i>t</i>-test</a></b> since we have a success proportion from each editor for each user.
+
+```{r t_test}
+t.test(
+  x = edit_counts$new_ui_prop_success,
+  y = edit_counts$old_ui_prop_success,
+  alternative = "greater",
+  paired = TRUE
+)
+```
+
+<aside>If some users were forced to use the new interface exclusively and others were forced to use the old interface exclusively -- as in a usual A/B test scenario -- then we would use a **two-sample _t_-test**.</aside>
+
+The average difference in proportion of published edits between the interfaces is 14.8% (*p* < 0.001), which is both practically *and* statistically significant.
+
+The underlying question here is different. The models above inferred the latent (hidden) value of the publish probability, which is different than inferring the average proportion of published edits.
+
+Also, for anyone curious:
+
+```{r hyp4}
+hyp4 <- "invlogit((Intercept) + new_interface) - invlogit((Intercept)) > 0.148"
+fit3 %>%
+  hypothesis(hyp4)
+```
+
+# Environment {.appendix}
+
+| Software                                                     | Version                         |
+|:-------------------------------------------------------------|:--------------------------------|
+| OS                                                           | `r osVersion`                   |
+| [R](https://www.r-project.org/)                              | `r R.version.string`            |
+| [CmdStan](https://mc-stan.org/users/interfaces/cmdstan.html) | `r cmdstanr::cmdstan_version()` |
