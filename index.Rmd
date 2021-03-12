@@ -7,10 +7,10 @@ author:
     url: https://mpopov.com/
     affiliation: Wikimedia Foundation
     affiliation_url: https://wikimediafoundation.org/
-date: "`r Sys.Date()`"
+date: "2021-03-12"
 bibliography: bibliography.bib
 nocite: |
-  @r-cmdstanr, @r-brms1, @r-brms2, @r-lme4, @r-rmarkdown, @r-distill, @r-tidyverse, @r-gt, @r-gtsummary
+  @r-base, @r-tidyverse, @r-rmarkdown, @r-distill, @r-gt, @r-gtsummary, @r-lme4, @r-brms1, @r-brms2, @r-cmdstanr, @r-tidybayes
 repository_url: https://github.com/bearloga/wmf-mlm-glm-notes
 creative_commons: CC BY
 output:
@@ -44,15 +44,39 @@ ggplot2::theme_set(
 ```
 # Setup
 
+In these notes we will use the statistical software and programming language [R](https://cran.r-project.org/), along with a few packages. [RStudio IDE](https://rstudio.com/products/rstudio/) is highly recommended, but not required.
+
 ```{r packages}
+# Essentials:
 library(zeallot) # multi-assignment operator %<-%
 library(tidyverse)
+# Presentable tables:
 library(gt)
 library(gtsummary)
+# Modelling:
 library(lme4)
 library(brms)
 library(tidybayes)
 ```
+
+<aside>**Note**: per personal preference [{cmdstanr}](https://mc-stan.org/cmdstanr/) will be used as the backend for the [{brms}](https://paul-buerkner.github.io/brms/) package, instead [{rstan}](https://mc-stan.org/rstan/)</aside>
+
+----
+
+Use the following code to install those packages if you want to follow along:
+
+```{r install, code_folding=TRUE, eval=FALSE}
+install.packages(
+  c("tidyverse", "zeallot", "lme4", "car", "brms", "tidybayes", "cmdstanr"),
+  repos = c("https://mc-stan.org/r-packages/", getOption("repos"))
+)
+cmdstanr::install_cmdstan()
+
+# Optional:
+install.packages(c("gt", "gtsummary")) # tables
+```
+
+----
 
 # Introduction
 
