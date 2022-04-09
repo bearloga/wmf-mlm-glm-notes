@@ -36,12 +36,8 @@ ggplot2::theme_set(
   )
 )
 ```
+`r wikipediapreview::wp_init(use_alt_style = TRUE)`
 
-<!-- https://chimeces.com/context-cards/ -->
-
-```{=html}
-<script src="context-cards.js"></script>
-```
 # Setup
 
 In these notes we will use the statistical software and programming language [R](https://cran.r-project.org/), along with a few packages. [RStudio IDE](https://rstudio.com/products/rstudio/) is highly recommended, but not required.
@@ -73,7 +69,7 @@ install.packages(
 cmdstanr::install_cmdstan()
 
 # Optional:
-install.packages(c("gt", "gtsummary")) # tables
+install.packages(c("gt", "gtsummary", "broom.mixed")) # tables
 ```
 
 ----
@@ -82,7 +78,7 @@ install.packages(c("gt", "gtsummary")) # tables
 
 Suppose we're running a test of a new editor interface for making edits to an article and we wish to know whether this new editing interface is an improvement -- defined as "whether the user published the edit after starting it." Specifically, we're interested in a lift of 20% in the publish (successful edit attempt) probability.
 
-We will build a model of edit attempt outcomes $y$ -- which is 1 if the edit was published and 0 if it was not. We use $p$ to indicate the probability of a successful edit -- in other words: $p = \text{Pr}(y = 1)$. The simplest version of our model is a <a href="https://en.wikipedia.org/wiki/Logistic_regression" data-wiki-lang="en" data-wiki-title="Logistic regression" class="wiki-preview">logistic regression</a>:
+We will build a model of edit attempt outcomes $y$ -- which is 1 if the edit was published and 0 if it was not. We use $p$ to indicate the probability of a successful edit -- in other words: $p = \text{Pr}(y = 1)$. The simplest version of our model is a [logistic regression](https://en.wikipedia.org/wiki/Logistic_regression){.wiki}:
 
 $$
 \begin{align*}
@@ -106,7 +102,7 @@ It is important to remember that these model parameters (also called coefficient
 
 <aside>
 
-See <a href="https://en.wikipedia.org/wiki/Logit" data-wiki-lang="en" data-wiki-title="Logit" class="wiki-preview">logit</a> for more details.
+See [logit](https://en.wikipedia.org/wiki/Logit){.wiki} for more details.
 
 </aside>
 
@@ -245,7 +241,7 @@ This model has done an OK job of estimating the coefficients $\beta_0$ = `r b0` 
 
 However, the model above is fundamentally flawed because it assumes all of the edit attempts are independent and identically distributed, but this is not the case. A much more correct model would incorporate the fact that these edit attempts are related to each other because they were done by the same users.
 
-<a href="https://en.wikipedia.org/wiki/Multilevel_model" data-wiki-lang="en" data-wiki-title="Multilevel model" class="wiki-preview">Hierarchical regression models</a> &ndash; also known as *multilevel models* and *mixed-effects models* (due to the presence of *random effects* in addition to *fixed effects*) &ndash; are used to model this structure when individuals observations are grouped. We refer to these groupings as *random effects*. In fact, we can even model more deeply nested structures &ndash; for example, if we had simulated multiple wikis and multiple users within those wikis then we could model this hierarchy.
+[Hierarchical regression models](https://en.wikipedia.org/wiki/Multilevel_model){.wiki} &ndash; also known as *multilevel models* and *mixed-effects models* (due to the presence of *random effects* in addition to *fixed effects*) &ndash; are used to model this structure when individuals observations are grouped. We refer to these groupings as *random effects*. In fact, we can even model more deeply nested structures &ndash; for example, if we had simulated multiple wikis and multiple users within those wikis then we could model this hierarchy.
 
 ```{r fit1}
 fit1 <- glmer(
@@ -270,7 +266,7 @@ This model has done a better job of estimating the coefficients $\beta_0$ = `r b
 
 ### Interpretation
 
-In order to interpret these estimates, we have to apply a transformation. However, we need to be careful about the confidence intervals. The <a href="https://en.wikipedia.org/wiki/Delta_method" data-wiki-lang="en" data-wiki-title="Delta method" class="wiki-preview">delta method models</a> can be used to estimate the confidence intervals of the transformed parameters:
+In order to interpret these estimates, we have to apply a transformation. However, we need to be careful about the confidence intervals. The [delta method ](https://en.wikipedia.org/wiki/Delta_method){.wiki} can be used to estimate the confidence intervals of the transformed parameters:
 
 <aside>**Spoiler**: We won't need to use the delta method in the next section when we switch to a Bayesian model.</aside>
 
@@ -410,7 +406,7 @@ In this case the estimates did not change much when excluding these most active 
 
 ## Bayesian Hierarchical Logistic Regression Model
 
-One of the benefits of switching to a Bayesian approach with this model is we can reason about the parameters (and any other quantities) probabilistically. This benefit will become apparent soon, but first we need to fit the Bayesian model and obtain draws of the parameters from what's called the joint <a href="https://en.wikipedia.org/wiki/Posterior_probability" data-wiki-lang="en" data-wiki-title="Posterior probability" class="wiki-preview">posterior distribution</a> -- so called because it's a re-allocation of possibilities (from values of parameters we thought were likely *a-priori*) after taking into account observed data.
+One of the benefits of switching to a Bayesian approach with this model is we can reason about the parameters (and any other quantities) probabilistically. This benefit will become apparent soon, but first we need to fit the Bayesian model and obtain draws of the parameters from what's called the joint [posterior distribution](https://en.wikipedia.org/wiki/Posterior_probability){.wiki} -- so called because it's a re-allocation of possibilities (from values of parameters we thought were likely *a-priori*) after taking into account observed data.
 
 ```{r fit3, cache=TRUE, results='hide', dependson="simulated-edits"}
 priors <- c(
@@ -487,7 +483,7 @@ The results are *essentially* the same as the non-Bayesian model in the previous
 
 ### Hypothesis Testing
 
-Hypothesis testing in this paradigm works a little differently. Rather than performing <a href="https://en.wikipedia.org/wiki/Statistical_hypothesis_testing" data-wiki-lang="en" data-wiki-title="Statistical hypothesis testing" class="wiki-preview">null hypothesis significance testing</a> (NHST), rejecting or failing-to-reject the null hypothesis, and calculating <a href="https://en.wikipedia.org/wiki/P-value" data-wiki-lang="en" data-wiki-title="p-value" class="wiki-preview"><i>p</i>-values</a>, we can ask for probabilities of ranges.
+Hypothesis testing in this paradigm works a little differently. Rather than performing [null hypothesis significance testing](https://en.wikipedia.org/wiki/Statistical_hypothesis_testing){.wiki} (NHST), rejecting or failing-to-reject the null hypothesis, and calculating [*p*-values](https://en.wikipedia.org/wiki/P-value){.wiki}, we can ask for probabilities of ranges.
 
 **What's the probability using the new interface at least doubles the odds of an edit getting published?**
 
@@ -567,7 +563,7 @@ ggplot(tidy_counts, aes(y = prop_success, x = interface)) +
 
 The users at the top (100%) and bottom (0%) made very few edits, so it is easy for the proportion to be "all" or "none" when the denominator is, say, 1.
 
-To actually test the hypothesis we perform a <b>paired <a href="https://en.wikipedia.org/wiki/Student%27s_t-test" data-wiki-lang="en" data-wiki-title="Student's t-test" class="wiki-preview"><i>t</i>-test</a></b> since we have a success proportion from each editor for each user.
+To actually test the hypothesis we perform a [**paired _t_-test**](https://en.wikipedia.org/wiki/Student%27s_t-test){.wiki} since we have a success proportion from each editor for each user.
 
 ```{r t_test}
 t.test(
